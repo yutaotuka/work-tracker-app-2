@@ -19,6 +19,7 @@
       <p>最上位グループ > 大グループ > 中グループ > タスク で計測・集計</p>
       <div class="header-actions">
         <button id="open-timeline-modal" type="button" class="header-link">タイムラインを開く</button>
+        <button id="open-schedule-modal" type="button" class="header-link">スケジュールを開く</button>
       </div>
       <div class="header-user">
         <span id="user-email" class="user-email"></span>
@@ -337,6 +338,41 @@
         </form>
         <p id="auth-error" class="auth-error" aria-live="polite"></p>
       </div>
+    </div>
+
+    <div id="schedule-modal" class="schedule-modal hidden" role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
+      <div class="schedule-modal-backdrop" data-close="1"></div>
+      <section class="schedule-modal-card">
+        <div class="schedule-modal-head">
+          <h2 id="schedule-modal-title">日程スケジュール</h2>
+          <div class="schedule-nav">
+            <button id="schedule-prev-day" type="button">前日</button>
+            <button id="schedule-today-btn" type="button">今日</button>
+            <button id="schedule-next-day" type="button">翌日</button>
+            <input id="schedule-day-date" type="date" />
+          </div>
+          <button id="close-schedule-modal" type="button" class="timeline-close-btn">閉じる</button>
+        </div>
+        <div class="schedule-legend">
+          <span class="sched-legend sched-legend-top">最上位</span>
+          <span class="sched-legend sched-legend-large">大グループ</span>
+          <span class="sched-legend sched-legend-mid">中グループ</span>
+          <span class="sched-legend sched-legend-task">タスク</span>
+          <span class="sched-legend sched-legend-actual">実績</span>
+          <span class="schedule-hint">予定エリアをクリック → 追加 / ブロックをクリック → 編集・削除</span>
+        </div>
+        <div class="schedule-col-headers">
+          <div class="schedule-gutter-head"></div>
+          <div class="schedule-col-head">予定</div>
+          <div class="schedule-col-head">実績</div>
+        </div>
+        <div class="schedule-scroll">
+          <div id="schedule-time-gutter" class="schedule-time-gutter"></div>
+          <div id="schedule-planned-col" class="schedule-col"></div>
+          <div id="schedule-actual-col" class="schedule-col schedule-col-actual"></div>
+        </div>
+        <div id="schedule-popover" class="schedule-popover hidden"></div>
+      </section>
     </div>
 
     <script src="./app.js"></script>

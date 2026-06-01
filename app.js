@@ -17,6 +17,17 @@ const TIMELINE_MIN_EVENT_HEIGHT = 18;
 const APP_VERSION_FALLBACK = "1970-01-01 00:00";
 const STATUS_OPTIONS = ["未着手", "着手", "チェック中", "完了", "取り下げ"];
 const REPEAT_OPTIONS = ["none", "daily", "weekly", "monthly"];
+const SCHED_START_HOUR = 7;
+const SCHED_END_HOUR = 22;
+const SCHED_PX_PER_MIN = 1;
+const SCHED_SNAP_MINUTES = 15;
+const SCHED_COLORS = {
+  top:    { border: "#7c3aed", bg: "#ede9fe", text: "#4c1d95" },
+  large:  { border: "#2563eb", bg: "#dbeafe", text: "#1e3a8a" },
+  mid:    { border: "#0891b2", bg: "#cffafe", text: "#164e63" },
+  task:   { border: "#059669", bg: "#dcfce7", text: "#064e3b" },
+  actual: { border: "#16a34a", bg: "#bbf7d0", text: "#14532d" },
+};
 
 const state = loadState();
 let isCloudSyncBusy = false;
@@ -34,6 +45,8 @@ let lastInteractionAt = 0;
 let lastLifecycleSyncAt = 0;
 let groupEditTargetTaskId = "";
 let groupEditInitialParentValue = "";
+let schedDragLastEndAt = 0;
+let scheduleNotifiedIds = new Set();
 
 const el = {
   openTimelineModal: document.getElementById("open-timeline-modal"),
@@ -119,6 +132,17 @@ const el = {
   groupEditMidSelect: document.getElementById("group-edit-mid-select"),
   groupEditSave: document.getElementById("group-edit-save"),
   groupEditCancel: document.getElementById("group-edit-cancel"),
+  openScheduleModal: document.getElementById("open-schedule-modal"),
+  scheduleModal: document.getElementById("schedule-modal"),
+  closeScheduleModal: document.getElementById("close-schedule-modal"),
+  scheduleDayDate: document.getElementById("schedule-day-date"),
+  schedulePrevDay: document.getElementById("schedule-prev-day"),
+  scheduleTodayBtn: document.getElementById("schedule-today-btn"),
+  scheduleNextDay: document.getElementById("schedule-next-day"),
+  schedulePlannedCol: document.getElementById("schedule-planned-col"),
+  scheduleActualCol: document.getElementById("schedule-actual-col"),
+  scheduleTimeGutter: document.getElementById("schedule-time-gutter"),
+  schedulePopover: document.getElementById("schedule-popover"),
 };
 
 if (!localStorage.getItem(AUTH_USER_ID_KEY)) {
@@ -158,6 +182,7 @@ setInterval(() => {
 startAutoSave();
 startCloudAutoSync();
 registerServiceWorker();
+setInterval(checkScheduleNotifications, 30000);
 
 function bindEvents() {
   el.openTimelineModal.addEventListener("click", openTimelineModal);
@@ -193,6 +218,35 @@ function bindEvents() {
     if (e.key === "Escape" && !el.timelineModal.classList.contains("hidden")) {
       closeTimelineModal();
     }
+    if (e.key === "Escape" && !el.scheduleModal.classList.contains("hidden")) {
+      closeScheduleModal();
+    }
+  });
+
+  // ── Schedule modal ──
+  el.openScheduleModal.addEventListener("click", openScheduleModal);
+  el.closeScheduleModal.addEventListener("click", closeScheduleModal);
+  el.scheduleModal.addEventListener("click", (e) => {
+    if (e.target.dataset.close === "1") closeScheduleModal();
+  });
+  el.scheduleModal.addEventListener("pointerdown", (e) => {
+    if (el.schedulePopover.classList.contains("hidden")) return;
+    if (!e.target.closest("#schedule-popover")) closeSchedPopover();
+  });
+  el.schedulePrevDay.addEventListener("click", () => shiftScheduleDay(-1));
+  el.scheduleTodayBtn.addEventListener("click", () => {
+    el.scheduleDayDate.value = formatDateInput(new Date());
+    renderScheduleGrid();
+  });
+  el.scheduleNextDay.addEventListener("click", () => shiftScheduleDay(1));
+  el.scheduleDayDate.addEventListener("change", renderScheduleGrid);
+  el.schedulePlannedCol.addEventListener("click", (e) => {
+    if (Date.now() - schedDragLastEndAt < 200) return;
+    if (e.target.closest(".sched-block")) return;
+    const rect = el.schedulePlannedCol.getBoundingClientRect();
+    const y = e.clientY - rect.top;
+    const clickMins = y / SCHED_PX_PER_MIN + SCHED_START_HOUR * 60;
+    openSchedPopover({ mode: "add", clickMins, clientX: e.clientX, clientY: e.clientY });
   });
 
   el.topForm.addEventListener("submit", (e) => {
@@ -1571,6 +1625,8 @@ function replaceState(next) {
   state.manualCollapsed = next.manualCollapsed;
   state.timelineView = next.timelineView;
   state.addSectionsCollapsed = next.addSectionsCollapsed;
+  state.scheduleEntries = next.scheduleEntries;
+  state.deletedScheduleEntryIds = next.deletedScheduleEntryIds;
   state.lastDataChangeAt = next.lastDataChangeAt;
 }
 
@@ -2910,6 +2966,10 @@ function migrateState(parsed) {
     timelineView: normalizeTimelineView(parsed.timelineView),
     addSectionsCollapsed:
       typeof parsed.addSectionsCollapsed === "boolean" ? parsed.addSectionsCollapsed : false,
+    scheduleEntries: Array.isArray(parsed.scheduleEntries)
+      ? parsed.scheduleEntries.map(normalizeScheduleEntry).filter(Boolean)
+      : [],
+    deletedScheduleEntryIds: uniqueStrings(parsed.deletedScheduleEntryIds),
     lastDataChangeAt:
       Number.isFinite(parsed.lastDataChangeAt) && parsed.lastDataChangeAt > 0
         ? parsed.lastDataChangeAt
@@ -2922,8 +2982,10 @@ function migrateState(parsed) {
     : [];
   const deletedTaskSet = new Set(next.deletedTaskIds);
   const deletedSessionSet = new Set(next.deletedSessionIds);
+  const deletedSchedSet = new Set(next.deletedScheduleEntryIds);
   next.tasks = next.tasks.filter((t) => !deletedTaskSet.has(t.id));
   next.sessions = next.sessions.filter((s) => !deletedSessionSet.has(s.id));
+  next.scheduleEntries = next.scheduleEntries.filter((e) => !deletedSchedSet.has(e.id));
 
   const hasMissingTopRef = next.largeGroups.some((g) => !g.topGroupId);
   if (!next.topGroups.length || hasMissingTopRef) {
@@ -2983,6 +3045,8 @@ function initialState() {
     manualCollapsed: true,
     timelineView: "calendar",
     addSectionsCollapsed: false,
+    scheduleEntries: [],
+    deletedScheduleEntryIds: [],
     lastDataChangeAt: Date.now(),
   };
 }
@@ -3013,6 +3077,10 @@ function mergeStates(base, incoming) {
   ]);
   const deletedTaskSet = new Set(deletedTaskIds);
   const deletedSessionSet = new Set(deletedSessionIds);
+  const deletedScheduleEntryIds = uniqueStrings([
+    ...(base.deletedScheduleEntryIds || []),
+    ...(incoming.deletedScheduleEntryIds || []),
+  ]);
 
   const baseUpdatedAt = resolveStateUpdatedAt(base);
   const incomingUpdatedAt = resolveStateUpdatedAt(incoming);
@@ -3050,6 +3118,8 @@ function mergeStates(base, incoming) {
     taskFilterStatuses: incoming.taskFilterStatuses || base.taskFilterStatuses,
     taskParentOrder: incoming.taskParentOrder || base.taskParentOrder,
     taskCollapsed: incoming.taskCollapsed || base.taskCollapsed,
+    scheduleEntries: mergeEntities(base.scheduleEntries || [], incoming.scheduleEntries || []),
+    deletedScheduleEntryIds,
     lastDataChangeAt: Math.max(resolveStateUpdatedAt(base), resolveStateUpdatedAt(incoming)),
   };
 
@@ -3536,4 +3606,521 @@ function formatTimelineDateTime(ms) {
   const d = new Date(ms);
   const dateLabel = `${d.getMonth() + 1}/${d.getDate()}`;
   return `${dateLabel} ${formatTimelineTime(ms)}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Schedule Feature
+// ═══════════════════════════════════════════════════════════════
+
+function normalizeScheduleEntry(e) {
+  if (!e || typeof e !== "object") return null;
+  const id = typeof e.id === "string" && e.id ? e.id : uid();
+  const date = typeof e.date === "string" ? e.date : "";
+  const startMinutes = Number.isFinite(e.startMinutes) ? e.startMinutes : SCHED_START_HOUR * 60;
+  const endMinutes = Number.isFinite(e.endMinutes) ? e.endMinutes : (SCHED_START_HOUR + 1) * 60;
+  const type = ["top", "large", "mid", "task"].includes(e.type) ? e.type : "task";
+  const refId = typeof e.refId === "string" ? e.refId : "";
+  const updatedAt = Number.isFinite(e.updatedAt) ? e.updatedAt : 0;
+  return { id, date, startMinutes, endMinutes, type, refId, updatedAt };
+}
+
+function openScheduleModal() {
+  if (!el.scheduleDayDate.value) {
+    el.scheduleDayDate.value = formatDateInput(new Date());
+  }
+  el.scheduleModal.classList.remove("hidden");
+  renderScheduleGrid();
+  requestNotificationPermission();
+}
+
+function closeScheduleModal() {
+  el.scheduleModal.classList.add("hidden");
+  closeSchedPopover();
+}
+
+function shiftScheduleDay(delta) {
+  const base = el.scheduleDayDate.value
+    ? new Date(el.scheduleDayDate.value + "T00:00:00")
+    : new Date();
+  base.setDate(base.getDate() + delta);
+  el.scheduleDayDate.value = formatDateInput(base);
+  renderScheduleGrid();
+}
+
+function getSchedDate() {
+  return el.scheduleDayDate.value || formatDateInput(new Date());
+}
+
+function minutesToTimeStr(mins) {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function timeStrToMinutes(str) {
+  if (!str) return NaN;
+  const [h, m] = str.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return NaN;
+  return h * 60 + m;
+}
+
+function snapMinutes(mins) {
+  return Math.round(mins / SCHED_SNAP_MINUTES) * SCHED_SNAP_MINUTES;
+}
+
+function getSchedLabel(entry) {
+  if (!entry || !entry.refId) return "(無題)";
+  if (entry.type === "top") {
+    const g = state.topGroups.find((g) => g.id === entry.refId);
+    return g ? g.name : "(削除済み)";
+  }
+  if (entry.type === "large") {
+    const g = state.largeGroups.find((g) => g.id === entry.refId);
+    return g ? g.name : "(削除済み)";
+  }
+  if (entry.type === "mid") {
+    const g = state.midGroups.find((g) => g.id === entry.refId);
+    return g ? g.name : "(削除済み)";
+  }
+  if (entry.type === "task") {
+    const t = state.tasks.find((t) => t.id === entry.refId);
+    return t ? t.name : "(削除済み)";
+  }
+  return "(不明)";
+}
+
+function renderScheduleGrid() {
+  if (!el.scheduleModal || el.scheduleModal.classList.contains("hidden")) return;
+
+  const date = getSchedDate();
+  const totalMins = (SCHED_END_HOUR - SCHED_START_HOUR) * 60;
+  const gridHeight = totalMins * SCHED_PX_PER_MIN;
+
+  // ── Time gutter ──
+  const gutter = el.scheduleTimeGutter;
+  gutter.innerHTML = "";
+  gutter.style.height = gridHeight + "px";
+  for (let h = SCHED_START_HOUR; h <= SCHED_END_HOUR; h++) {
+    const top = (h - SCHED_START_HOUR) * 60 * SCHED_PX_PER_MIN;
+    const label = document.createElement("div");
+    label.className = "sched-hour-label";
+    label.style.top = top + "px";
+    label.textContent = `${String(h).padStart(2, "0")}:00`;
+    gutter.appendChild(label);
+  }
+
+  // ── Planned & Actual columns ──
+  const plannedCol = el.schedulePlannedCol;
+  const actualCol = el.scheduleActualCol;
+  plannedCol.innerHTML = "";
+  actualCol.innerHTML = "";
+  plannedCol.style.height = gridHeight + "px";
+  actualCol.style.height = gridHeight + "px";
+
+  // Hour lines
+  for (let h = SCHED_START_HOUR; h <= SCHED_END_HOUR; h++) {
+    const top = (h - SCHED_START_HOUR) * 60 * SCHED_PX_PER_MIN;
+    for (const col of [plannedCol, actualCol]) {
+      const line = document.createElement("div");
+      line.className = "sched-hour-line";
+      line.style.top = top + "px";
+      col.appendChild(line);
+    }
+    if (h < SCHED_END_HOUR) {
+      const halfTop = top + 30 * SCHED_PX_PER_MIN;
+      for (const col of [plannedCol, actualCol]) {
+        const hl = document.createElement("div");
+        hl.className = "sched-half-line";
+        hl.style.top = halfTop + "px";
+        col.appendChild(hl);
+      }
+    }
+  }
+
+  // Planned entries for this date
+  const todayEntries = (state.scheduleEntries || []).filter((e) => e.date === date);
+  for (const entry of todayEntries) {
+    plannedCol.appendChild(buildSchedBlock(entry));
+  }
+
+  // Actual sessions for this date
+  const allSessions = materializeSessions(Date.now());
+  const dayStart = new Date(date + "T00:00:00").getTime();
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const daySessions = allSessions.filter((s) => s.endAt > dayStart && s.startAt < dayEnd);
+  for (const s of daySessions) {
+    const block = buildActualBlock(s, date);
+    if (block) actualCol.appendChild(block);
+  }
+
+  // Current time indicator (today only)
+  const today = formatDateInput(new Date());
+  if (date === today) {
+    const now = new Date();
+    const nowMins = now.getHours() * 60 + now.getMinutes();
+    if (nowMins >= SCHED_START_HOUR * 60 && nowMins <= SCHED_END_HOUR * 60) {
+      const top = (nowMins - SCHED_START_HOUR * 60) * SCHED_PX_PER_MIN;
+      for (const col of [plannedCol, actualCol]) {
+        const indicator = document.createElement("div");
+        indicator.className = "sched-now-line";
+        indicator.style.top = top + "px";
+        col.appendChild(indicator);
+      }
+    }
+  }
+}
+
+function buildSchedBlock(entry) {
+  const startOffset = entry.startMinutes - SCHED_START_HOUR * 60;
+  const duration = entry.endMinutes - entry.startMinutes;
+  const top = startOffset * SCHED_PX_PER_MIN;
+  const height = Math.max(duration * SCHED_PX_PER_MIN, 20);
+  const colors = SCHED_COLORS[entry.type] || SCHED_COLORS.task;
+  const label = getSchedLabel(entry);
+  const timeLabel = `${minutesToTimeStr(entry.startMinutes)}–${minutesToTimeStr(entry.endMinutes)}`;
+
+  const block = document.createElement("div");
+  block.className = "sched-block";
+  block.dataset.schedId = entry.id;
+  block.style.top = top + "px";
+  block.style.height = height + "px";
+  block.style.background = colors.bg;
+  block.style.borderLeftColor = colors.border;
+  block.style.color = colors.text;
+  block.innerHTML =
+    `<span class="sched-block-time">${escapeHtml(timeLabel)}</span>` +
+    `<span class="sched-block-label">${escapeHtml(label)}</span>` +
+    `<div class="sched-resize-handle" data-sched-resize="1" title="ドラッグでリサイズ"></div>`;
+
+  // Pointer-based: drag to move, click opens edit popover
+  block.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("[data-sched-resize]")) return;
+    e.preventDefault();
+    startSchedBlockInteraction(e, "move", entry.id);
+  });
+
+  // Resize handle
+  const rh = block.querySelector("[data-sched-resize]");
+  if (rh) {
+    rh.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startSchedBlockInteraction(e, "resize", entry.id);
+    });
+  }
+
+  return block;
+}
+
+function buildActualBlock(session, date) {
+  const dayStart = new Date(date + "T00:00:00").getTime();
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const startMs = Math.max(session.startAt, dayStart);
+  const endMs = Math.min(session.endAt, dayEnd);
+  if (endMs <= startMs) return null;
+
+  const startD = new Date(startMs);
+  const endD = new Date(endMs);
+  const startMins = startD.getHours() * 60 + startD.getMinutes();
+  const endMins = endD.getHours() * 60 + endD.getMinutes();
+  const clampedStart = Math.max(startMins, SCHED_START_HOUR * 60);
+  const clampedEnd = Math.min(endMins, SCHED_END_HOUR * 60);
+  if (clampedEnd <= clampedStart) return null;
+
+  const top = (clampedStart - SCHED_START_HOUR * 60) * SCHED_PX_PER_MIN;
+  const height = Math.max((clampedEnd - clampedStart) * SCHED_PX_PER_MIN, 20);
+  const colors = SCHED_COLORS.actual;
+  const timeLabel = `${minutesToTimeStr(startMins)}–${minutesToTimeStr(endMins)}`;
+
+  const block = document.createElement("div");
+  block.className = "sched-block sched-block-actual";
+  block.style.top = top + "px";
+  block.style.height = height + "px";
+  block.style.background = colors.bg;
+  block.style.borderLeftColor = colors.border;
+  block.style.color = colors.text;
+  block.title = session.taskName || "(不明)";
+  block.innerHTML =
+    `<span class="sched-block-time">${escapeHtml(timeLabel)}</span>` +
+    `<span class="sched-block-label">${escapeHtml(session.taskName || "(不明)")}</span>`;
+  return block;
+}
+
+// ── Block Interaction (move / resize / click-to-edit) ──
+
+function startSchedBlockInteraction(e, mode, entryId) {
+  const entry = (state.scheduleEntries || []).find((en) => en.id === entryId);
+  if (!entry) return;
+
+  const startY = e.clientY;
+  const origStart = entry.startMinutes;
+  const origEnd = entry.endMinutes;
+  let moved = false;
+
+  const onMove = (me) => {
+    const dy = me.clientY - startY;
+    if (!moved && Math.abs(dy) < 5) return;
+    moved = true;
+
+    if (mode === "move") {
+      const duration = origEnd - origStart;
+      let newStart = snapMinutes(origStart + Math.round(dy / SCHED_PX_PER_MIN));
+      newStart = Math.max(SCHED_START_HOUR * 60, Math.min(SCHED_END_HOUR * 60 - duration, newStart));
+      entry.startMinutes = newStart;
+      entry.endMinutes = newStart + duration;
+    } else {
+      let newEnd = snapMinutes(origEnd + Math.round(dy / SCHED_PX_PER_MIN));
+      newEnd = Math.max(origStart + SCHED_SNAP_MINUTES, Math.min(SCHED_END_HOUR * 60, newEnd));
+      entry.endMinutes = newEnd;
+    }
+    renderScheduleGrid();
+  };
+
+  const onUp = (ue) => {
+    document.removeEventListener("pointermove", onMove);
+    document.removeEventListener("pointerup", onUp);
+
+    if (!moved) {
+      // Treat as click → open edit popover
+      openSchedPopover({ mode: "edit", entryId, clientX: ue.clientX, clientY: ue.clientY });
+    } else {
+      schedDragLastEndAt = Date.now();
+      entry.updatedAt = Date.now();
+      state.lastDataChangeAt = Date.now();
+      persistAndRender();
+      renderScheduleGrid();
+    }
+  };
+
+  document.addEventListener("pointermove", onMove);
+  document.addEventListener("pointerup", onUp);
+}
+
+// ── Popover ──
+
+function buildRefSelectOptions(type, currentRefId) {
+  let items = [];
+  if (type === "top") items = state.topGroups.filter((g) => !g.archived);
+  else if (type === "large") items = state.largeGroups.filter((g) => !g.archived);
+  else if (type === "mid") items = state.midGroups.filter((g) => !g.archived);
+  else if (type === "task")
+    items = state.tasks.filter((t) => t.status !== "完了" && t.status !== "取り下げ");
+  if (!items.length) return '<option value="">(なし)</option>';
+  return items
+    .map(
+      (item) =>
+        `<option value="${escapeHtml(item.id)}"${item.id === currentRefId ? " selected" : ""}>${escapeHtml(item.name)}</option>`
+    )
+    .join("");
+}
+
+function openSchedPopover({ mode, clickMins, entryId, clientX, clientY }) {
+  const popover = el.schedulePopover;
+  const typeLabels = {
+    top: "最上位グループ",
+    large: "大グループ",
+    mid: "中グループ",
+    task: "タスク",
+  };
+  const typeOptions = Object.entries(typeLabels)
+    .map(([v, l]) => `<option value="${v}">${l}</option>`)
+    .join("");
+
+  if (mode === "add") {
+    const startMins = Math.max(
+      SCHED_START_HOUR * 60,
+      Math.min(SCHED_END_HOUR * 60, snapMinutes(clickMins || SCHED_START_HOUR * 60))
+    );
+    const endMins = Math.min(startMins + 60, SCHED_END_HOUR * 60);
+
+    popover.innerHTML = `
+      <div class="sched-pop-title">予定を追加</div>
+      <label class="sched-pop-field">種別
+        <select id="sched-pop-type">${typeOptions}</select>
+      </label>
+      <label class="sched-pop-field">対象
+        <select id="sched-pop-ref"></select>
+      </label>
+      <div class="sched-pop-row">
+        <label class="sched-pop-field">開始
+          <input type="time" id="sched-pop-start" value="${minutesToTimeStr(startMins)}" step="900" />
+        </label>
+        <label class="sched-pop-field">終了
+          <input type="time" id="sched-pop-end" value="${minutesToTimeStr(endMins)}" step="900" />
+        </label>
+      </div>
+      <div class="sched-pop-btns">
+        <button id="sched-pop-save" type="button" class="sched-pop-btn-primary">追加</button>
+        <button id="sched-pop-cancel" type="button" class="sched-pop-btn-cancel">キャンセル</button>
+      </div>`;
+
+    const typeSelect = popover.querySelector("#sched-pop-type");
+    const refSelect = popover.querySelector("#sched-pop-ref");
+    const refreshRef = () => {
+      refSelect.innerHTML = buildRefSelectOptions(typeSelect.value, "");
+    };
+    typeSelect.addEventListener("change", refreshRef);
+    refreshRef();
+
+    popover.querySelector("#sched-pop-save").addEventListener("click", () => {
+      if (!ensureSyncMutable("スケジュール追加")) return;
+      const type = typeSelect.value;
+      const refId = refSelect.value;
+      const sMin = timeStrToMinutes(popover.querySelector("#sched-pop-start").value);
+      const eMin = timeStrToMinutes(popover.querySelector("#sched-pop-end").value);
+      if (!refId || isNaN(sMin) || isNaN(eMin) || eMin <= sMin) {
+        alert("入力を確認してください（終了時刻 > 開始時刻）");
+        return;
+      }
+      if (!Array.isArray(state.scheduleEntries)) state.scheduleEntries = [];
+      state.scheduleEntries.push({
+        id: uid(),
+        date: getSchedDate(),
+        startMinutes: sMin,
+        endMinutes: eMin,
+        type,
+        refId,
+        updatedAt: Date.now(),
+      });
+      state.lastDataChangeAt = Date.now();
+      closeSchedPopover();
+      persistAndRender();
+      renderScheduleGrid();
+    });
+    popover.querySelector("#sched-pop-cancel").addEventListener("click", closeSchedPopover);
+  } else {
+    // edit
+    const entry = (state.scheduleEntries || []).find((en) => en.id === entryId);
+    if (!entry) {
+      closeSchedPopover();
+      return;
+    }
+
+    const typeOptionsWithSelected = Object.entries(typeLabels)
+      .map(([v, l]) => `<option value="${v}"${v === entry.type ? " selected" : ""}>${l}</option>`)
+      .join("");
+
+    popover.innerHTML = `
+      <div class="sched-pop-title">予定を編集</div>
+      <label class="sched-pop-field">種別
+        <select id="sched-pop-type">${typeOptionsWithSelected}</select>
+      </label>
+      <label class="sched-pop-field">対象
+        <select id="sched-pop-ref"></select>
+      </label>
+      <div class="sched-pop-row">
+        <label class="sched-pop-field">開始
+          <input type="time" id="sched-pop-start" value="${minutesToTimeStr(entry.startMinutes)}" step="900" />
+        </label>
+        <label class="sched-pop-field">終了
+          <input type="time" id="sched-pop-end" value="${minutesToTimeStr(entry.endMinutes)}" step="900" />
+        </label>
+      </div>
+      <div class="sched-pop-btns">
+        <button id="sched-pop-save" type="button" class="sched-pop-btn-primary">保存</button>
+        <button id="sched-pop-delete" type="button" class="sched-pop-btn-delete">削除</button>
+        <button id="sched-pop-cancel" type="button" class="sched-pop-btn-cancel">キャンセル</button>
+      </div>`;
+
+    const typeSelect = popover.querySelector("#sched-pop-type");
+    const refSelect = popover.querySelector("#sched-pop-ref");
+    const refreshRef = () => {
+      refSelect.innerHTML = buildRefSelectOptions(typeSelect.value, entry.refId);
+    };
+    typeSelect.addEventListener("change", refreshRef);
+    refreshRef();
+
+    popover.querySelector("#sched-pop-save").addEventListener("click", () => {
+      if (!ensureSyncMutable("スケジュール編集")) return;
+      const type = typeSelect.value;
+      const refId = refSelect.value;
+      const sMin = timeStrToMinutes(popover.querySelector("#sched-pop-start").value);
+      const eMin = timeStrToMinutes(popover.querySelector("#sched-pop-end").value);
+      if (!refId || isNaN(sMin) || isNaN(eMin) || eMin <= sMin) {
+        alert("入力を確認してください（終了時刻 > 開始時刻）");
+        return;
+      }
+      entry.type = type;
+      entry.refId = refId;
+      entry.startMinutes = sMin;
+      entry.endMinutes = eMin;
+      entry.updatedAt = Date.now();
+      state.lastDataChangeAt = Date.now();
+      closeSchedPopover();
+      persistAndRender();
+      renderScheduleGrid();
+    });
+
+    popover.querySelector("#sched-pop-delete").addEventListener("click", () => {
+      if (!ensureSyncMutable("スケジュール削除")) return;
+      if (!confirm("この予定を削除しますか？")) return;
+      if (!Array.isArray(state.deletedScheduleEntryIds)) state.deletedScheduleEntryIds = [];
+      state.deletedScheduleEntryIds.push(entry.id);
+      state.scheduleEntries = (state.scheduleEntries || []).filter((en) => en.id !== entry.id);
+      state.lastDataChangeAt = Date.now();
+      closeSchedPopover();
+      persistAndRender();
+      renderScheduleGrid();
+    });
+
+    popover.querySelector("#sched-pop-cancel").addEventListener("click", closeSchedPopover);
+  }
+
+  positionSchedPopover(clientX, clientY);
+  popover.classList.remove("hidden");
+}
+
+function positionSchedPopover(x, y) {
+  const popover = el.schedulePopover;
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  const pw = 300;
+  const ph = 380;
+  let left = (x != null ? x : W / 2) + 14;
+  let top = y != null ? y : H / 2 - ph / 2;
+  if (left + pw > W - 8) left = (x != null ? x : W / 2) - pw - 14;
+  if (top + ph > H - 8) top = H - ph - 8;
+  top = Math.max(8, top);
+  left = Math.max(8, left);
+  popover.style.left = left + "px";
+  popover.style.top = top + "px";
+}
+
+function closeSchedPopover() {
+  if (!el.schedulePopover) return;
+  el.schedulePopover.classList.add("hidden");
+  el.schedulePopover.innerHTML = "";
+}
+
+// ── Notifications ──
+
+function requestNotificationPermission() {
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+function checkScheduleNotifications() {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!Array.isArray(state.scheduleEntries) || !state.scheduleEntries.length) return;
+  const now = new Date();
+  const date = formatDateInput(now);
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const todayEntries = state.scheduleEntries.filter((e) => e.date === date);
+  for (const entry of todayEntries) {
+    // Notify when current minute is within [startMinutes, startMinutes + 1]
+    if (nowMins < entry.startMinutes || nowMins > entry.startMinutes + 1) continue;
+    const key = `${entry.id}-${entry.startMinutes}`;
+    if (scheduleNotifiedIds.has(key)) continue;
+    scheduleNotifiedIds.add(key);
+    const label = getSchedLabel(entry);
+    try {
+      new Notification("スケジュール通知", {
+        body: `${minutesToTimeStr(entry.startMinutes)} 「${label}」の時間です`,
+        icon: "./icon.svg",
+      });
+    } catch (_) {
+      // Notification may fail in some environments; ignore silently
+    }
+  }
 }
