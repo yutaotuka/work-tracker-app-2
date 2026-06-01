@@ -11,7 +11,7 @@ const AUTO_SAVE_INTERVAL_MS = 15000;
 const AUTO_CLOUD_SAVE_INTERVAL_MS = 300000;
 const AUTO_CLOUD_LOAD_INTERVAL_MS = 600000;
 const AUTO_CLOUD_LATEST_CHECK_INTERVAL_MS = 60000;
-const AUTO_CLOUD_APPLY_COOLDOWN_MS = 3000;
+const AUTO_CLOUD_APPLY_COOLDOWN_MS = 10000;
 const AUTO_RECURRENCE_CHECK_MS = 60000;
 const TIMELINE_MIN_EVENT_HEIGHT = 18;
 const APP_VERSION_FALLBACK = "1970-01-01 00:00";
@@ -30,6 +30,7 @@ let timerAudioCtx = null;
 let renderDebounceTimer = null;
 let syncUiLockActive = false;
 let lastLocalMutationAt = 0;
+let lastInteractionAt = 0;
 let lastLifecycleSyncAt = 0;
 let groupEditTargetTaskId = "";
 let groupEditInitialParentValue = "";
@@ -1634,10 +1635,7 @@ async function cloudSaveRequest(_endpoint, localSnapshot = state, expectedMutati
   await cloudSaveToFirestore(mergedData, savedAt);
   lastSeenCloudSavedAt = Math.max(lastSeenCloudSavedAt, savedAt);
   const hadLocalChangeDuringSave = lastLocalMutationAt !== expectedMutationAt;
-  if (!hadLocalChangeDuringSave) {
-    replaceState(migrateState(mergedData));
-    persistState();
-  }
+  // ローカル状態を上書きしない — 定期同期に任せる
   return { parsed: { ok: true }, hadLocalChangeDuringSave };
 }
 
@@ -1969,7 +1967,7 @@ async function autoCloudLoadPeriodic() {
       merged.activeSession = state.activeSession;
     }
     if (lastLocalMutationAt !== loadStartedLocalMutationAt) return;
-    if (Date.now() - lastLocalMutationAt < AUTO_CLOUD_APPLY_COOLDOWN_MS) return;
+    if (Date.now() - Math.max(lastLocalMutationAt, lastInteractionAt) < AUTO_CLOUD_APPLY_COOLDOWN_MS) return;
     const localSerialized = JSON.stringify(local);
     const mergedSerialized = JSON.stringify(merged);
     if (localSerialized === mergedSerialized) return;
@@ -2746,6 +2744,7 @@ function persistQuickChange() {
 }
 
 function persistUiAndRender() {
+  lastInteractionAt = Date.now();
   persistState();
   renderAll();
 }
