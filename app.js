@@ -1,8 +1,12 @@
 const STORAGE_KEY = "work-tracker-data-v1";
 const STORAGE_RECOVERY_KEY = "work-tracker-data-v1-recovery";
-const CLOUD_ENDPOINT_KEY = "work-tracker-cloud-endpoint";
-const CLOUD_ENDPOINT_DEFAULT =
-  "https://script.google.com/macros/s/AKfycbxJZtFGoBFuRPcW-EdD9WMaOE716tFNJFHWYQQY0-hHPzOJOUPZ5pM0SezJye9xf6GmJg/exec";
+const FIREBASE_PROJECT_ID = "work-tracker-3ec98";
+const FIREBASE_API_KEY = "AIzaSyBAUwsgsmlklkxdCMUKOfTdkgaf498EzpI";
+const AUTH_TOKEN_KEY = "work-tracker-auth-token";
+const AUTH_REFRESH_TOKEN_KEY = "work-tracker-auth-refresh";
+const AUTH_TOKEN_EXPIRY_KEY = "work-tracker-auth-expiry";
+const AUTH_USER_ID_KEY = "work-tracker-auth-uid";
+const AUTH_USER_EMAIL_KEY = "work-tracker-auth-email";
 const AUTO_SAVE_INTERVAL_MS = 15000;
 const AUTO_CLOUD_SAVE_INTERVAL_MS = 300000;
 const AUTO_CLOUD_LOAD_INTERVAL_MS = 600000;
@@ -10,13 +14,13 @@ const AUTO_CLOUD_LATEST_CHECK_INTERVAL_MS = 60000;
 const AUTO_CLOUD_APPLY_COOLDOWN_MS = 3000;
 const AUTO_RECURRENCE_CHECK_MS = 60000;
 const TIMELINE_MIN_EVENT_HEIGHT = 18;
-const SPREADSHEET_ID = "1ggWSLbaj5vFMmkcJP4EWAUxQusQ12m8jpWmta0-lmDg";
 const APP_VERSION_FALLBACK = "1970-01-01 00:00";
 const STATUS_OPTIONS = ["未着手", "着手", "チェック中", "完了", "取り下げ"];
 const REPEAT_OPTIONS = ["none", "daily", "weekly", "monthly"];
 
 const state = loadState();
 let isCloudSyncBusy = false;
+let authMode = "login";
 let dragDropdownListenerInitialized = false;
 let draggingTaskId = "";
 let cloudSaveDebounceTimer = null;
@@ -68,7 +72,14 @@ const el = {
   manualMinutes: document.getElementById("manual-minutes"),
   backupExport: document.getElementById("backup-export"),
   backupImport: document.getElementById("backup-import"),
-  cloudEndpoint: document.getElementById("cloud-endpoint"),
+  authOverlay: document.getElementById("auth-overlay"),
+  authForm: document.getElementById("auth-form"),
+  authEmail: document.getElementById("auth-email"),
+  authPassword: document.getElementById("auth-password"),
+  authSubmit: document.getElementById("auth-submit"),
+  authError: document.getElementById("auth-error"),
+  logoutBtn: document.getElementById("logout-btn"),
+  userEmail: document.getElementById("user-email"),
   cloudSave: document.getElementById("cloud-save"),
   cloudLoad: document.getElementById("cloud-load"),
   backupFile: document.getElementById("backup-file"),
@@ -109,7 +120,11 @@ const el = {
   groupEditCancel: document.getElementById("group-edit-cancel"),
 };
 
-el.cloudEndpoint.value = localStorage.getItem(CLOUD_ENDPOINT_KEY) || CLOUD_ENDPOINT_DEFAULT;
+if (!localStorage.getItem(AUTH_USER_ID_KEY)) {
+  showAuthOverlay();
+} else {
+  renderUserInfo();
+}
 if (!el.manualDate.value) {
   el.manualDate.value = formatDateInput(new Date());
 }
@@ -334,9 +349,41 @@ function bindEvents() {
     el.backupFile.click();
   });
   el.backupFile.addEventListener("change", importBackup);
-  el.cloudEndpoint.addEventListener("change", () => {
-    localStorage.setItem(CLOUD_ENDPOINT_KEY, el.cloudEndpoint.value.trim());
+  el.authOverlay?.querySelectorAll(".auth-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.authTab;
+      if (!tab) return;
+      authMode = tab;
+      el.authOverlay.querySelectorAll(".auth-tab-btn").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.authTab === tab);
+      });
+      if (el.authSubmit) el.authSubmit.textContent = tab === "register" ? "新規登録" : "ログイン";
+      if (el.authError) el.authError.textContent = "";
+    });
   });
+  el.authForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = el.authEmail?.value.trim() || "";
+    const password = el.authPassword?.value || "";
+    if (el.authSubmit) el.authSubmit.disabled = true;
+    if (el.authError) el.authError.textContent = "";
+    try {
+      if (authMode === "register") {
+        await signUp(email, password);
+      } else {
+        await signIn(email, password);
+      }
+      hideAuthOverlay();
+      renderUserInfo();
+      await autoCloudLoadAfterLogin();
+      renderAll();
+    } catch (error) {
+      if (el.authError) el.authError.textContent = error.message || "認証に失敗しました。";
+    } finally {
+      if (el.authSubmit) el.authSubmit.disabled = false;
+    }
+  });
+  el.logoutBtn?.addEventListener("click", handleLogout);
   el.cloudSave.addEventListener("click", cloudSave);
   el.cloudLoad.addEventListener("click", cloudLoad);
   if (el.groupEditCancel) {
@@ -1528,15 +1575,14 @@ function replaceState(next) {
 
 async function cloudSave() {
   if (isCloudSyncBusy) return;
-  const endpoint = getCloudEndpoint();
-  if (!endpoint) return;
+  if (!getFirebaseConfig()) return;
 
   isCloudSyncBusy = true;
   setCloudBusy(true, { uiLock: true });
   try {
     const saveToken = lastLocalMutationAt;
     const snapshot = migrateState(state);
-    const result = await cloudSaveRequest(endpoint, snapshot, saveToken);
+    const result = await cloudSaveRequest(null, snapshot, saveToken);
     if (result && result.hadLocalChangeDuringSave) {
       cloudSavePending = true;
       queueCloudSave(0);
@@ -1552,13 +1598,12 @@ async function cloudSave() {
 
 async function cloudLoad() {
   if (isCloudSyncBusy) return;
-  const endpoint = getCloudEndpoint();
-  if (!endpoint) return;
+  if (!getFirebaseConfig()) return;
 
   isCloudSyncBusy = true;
   setCloudBusy(true, { uiLock: true });
   try {
-    const parsed = await cloudLoadRequest(endpoint);
+    const parsed = await cloudLoadRequest();
     if (!parsed.data) {
       alert("クラウドに復元データがありません。");
       return;
@@ -1580,78 +1625,242 @@ async function cloudLoad() {
   }
 }
 
-async function cloudSaveRequest(endpoint, localSnapshot = state, expectedMutationAt = lastLocalMutationAt) {
-  const mergedData = await mergeStateWithCloud(endpoint, localSnapshot);
+async function cloudSaveRequest(_endpoint, localSnapshot = state, expectedMutationAt = lastLocalMutationAt) {
+  const mergedData = await mergeStateWithCloud(null, localSnapshot);
   if (!mergedData) {
     throw new Error("クラウド読込に失敗したため、上書き事故防止のため保存を中止しました。");
   }
   const savedAt = resolveStateUpdatedAt(mergedData);
-  const payload = {
-    action: "save",
-    sheetId: SPREADSHEET_ID,
-    savedAt,
-    data: mergedData,
-  };
-  const res = await fetch(endpoint, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  const text = await res.text();
-  const parsed = parseCloudResponse(text);
-  if (!res.ok || !parsed.ok) {
-    throw new Error(parsed.message || "クラウド保存に失敗しました。");
-  }
+  await cloudSaveToFirestore(mergedData, savedAt);
   lastSeenCloudSavedAt = Math.max(lastSeenCloudSavedAt, savedAt);
   const hadLocalChangeDuringSave = lastLocalMutationAt !== expectedMutationAt;
   if (!hadLocalChangeDuringSave) {
     replaceState(migrateState(mergedData));
     persistState();
   }
-  return { parsed, hadLocalChangeDuringSave };
+  return { parsed: { ok: true }, hadLocalChangeDuringSave };
 }
 
-async function cloudLoadRequest(endpoint) {
-  const url = new URL(endpoint);
-  url.searchParams.set("action", "load");
-  url.searchParams.set("sheetId", SPREADSHEET_ID);
-  const res = await fetch(url.toString(), { method: "GET" });
-  const text = await res.text();
-  const parsed = parseCloudResponse(text);
-  if (!res.ok || !parsed.ok) {
-    throw new Error(parsed.message || "クラウド読込に失敗しました。");
+async function cloudLoadRequest() {
+  const config = getFirebaseConfigSilent();
+  if (!config) throw new Error("ログインが必要です。");
+  const idToken = await getValidIdToken();
+  const res = await fetch(buildFirestoreUrl(config), {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (res.status === 404) {
+    return { ok: true, data: null, savedAt: 0 };
   }
-  return parsed;
-}
-
-async function cloudLatestSavedAtRequest(endpoint) {
-  const url = new URL(endpoint);
-  url.searchParams.set("action", "latest");
-  url.searchParams.set("sheetId", SPREADSHEET_ID);
-  const res = await fetch(url.toString(), { method: "GET" });
-  const text = await res.text();
-  const parsed = parseCloudResponse(text);
-  if (!res.ok || !parsed.ok) {
-    throw new Error(parsed.message || "クラウド更新確認に失敗しました。");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || "クラウド読込に失敗しました。");
   }
-  return Number.isFinite(parsed.savedAt) ? parsed.savedAt : 0;
+  const doc = await res.json();
+  const savedAt = Number(doc.fields?.savedAt?.integerValue) || 0;
+  const dataJson = doc.fields?.dataJson?.stringValue || null;
+  const data = dataJson ? JSON.parse(dataJson) : null;
+  return { ok: true, data, savedAt };
 }
 
-function parseCloudResponse(text) {
+async function cloudLatestSavedAtRequest() {
+  const config = getFirebaseConfigSilent();
+  if (!config) return 0;
+  const idToken = await getValidIdToken().catch(() => null);
+  if (!idToken) return 0;
+  const url = `${buildFirestoreUrl(config)}&mask.fieldPaths=savedAt`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  }).catch(() => null);
+  if (!res || res.status === 404 || !res.ok) return 0;
+  const doc = await res.json().catch(() => ({}));
+  return Number(doc.fields?.savedAt?.integerValue) || 0;
+}
+
+async function cloudSaveToFirestore(data, savedAt) {
+  const config = getFirebaseConfigSilent();
+  if (!config) throw new Error("ログインが必要です。");
+  const idToken = await getValidIdToken();
+  const body = {
+    fields: {
+      savedAt: { integerValue: String(savedAt) },
+      dataJson: { stringValue: JSON.stringify(data) },
+    },
+  };
+  const res = await fetch(buildFirestoreUrl(config), {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || "クラウド保存に失敗しました。");
+  }
+}
+
+function buildFirestoreUrl(config) {
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/databases/(default)/documents/users/${encodeURIComponent(config.uid)}/data/appState?key=${encodeURIComponent(config.apiKey)}`;
+}
+
+function getFirebaseConfig() {
+  const config = getFirebaseConfigSilent();
+  if (!config) {
+    alert("ログインが必要です。");
+    return null;
+  }
+  return config;
+}
+
+function getFirebaseConfigSilent() {
+  const uid = localStorage.getItem(AUTH_USER_ID_KEY) || "";
+  if (!uid) return null;
+  return { projectId: FIREBASE_PROJECT_ID, apiKey: FIREBASE_API_KEY, uid };
+}
+
+function isFirebaseConfigured() {
+  return Boolean(getFirebaseConfigSilent());
+}
+
+async function getValidIdToken() {
+  const expiry = Number(localStorage.getItem(AUTH_TOKEN_EXPIRY_KEY)) || 0;
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (token && Date.now() < expiry - 60000) return token;
+  const refreshToken = localStorage.getItem(AUTH_REFRESH_TOKEN_KEY);
+  if (!refreshToken) {
+    showAuthOverlay();
+    throw new Error("ログインが必要です。");
+  }
+  return refreshIdToken(refreshToken);
+}
+
+async function refreshIdToken(refreshToken) {
+  const res = await fetch(
+    `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refreshToken }),
+    }
+  );
+  if (!res.ok) {
+    clearAuthData();
+    showAuthOverlay();
+    throw new Error("セッションの有効期限が切れました。再ログインしてください。");
+  }
+  const data = await res.json();
+  saveAuthToken(data.id_token, data.refresh_token, Number(data.expires_in) * 1000);
+  return data.id_token;
+}
+
+function saveAuthToken(idToken, refreshToken, expiresInMs) {
+  localStorage.setItem(AUTH_TOKEN_KEY, idToken);
+  localStorage.setItem(AUTH_REFRESH_TOKEN_KEY, refreshToken);
+  localStorage.setItem(AUTH_TOKEN_EXPIRY_KEY, String(Date.now() + expiresInMs));
+}
+
+function clearAuthData() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_REFRESH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_TOKEN_EXPIRY_KEY);
+  localStorage.removeItem(AUTH_USER_ID_KEY);
+  localStorage.removeItem(AUTH_USER_EMAIL_KEY);
+}
+
+async function signIn(email, password) {
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(translateAuthError(data.error?.message));
+  saveAuthToken(data.idToken, data.refreshToken, Number(data.expiresIn) * 1000);
+  localStorage.setItem(AUTH_USER_ID_KEY, data.localId);
+  localStorage.setItem(AUTH_USER_EMAIL_KEY, data.email);
+}
+
+async function signUp(email, password) {
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(translateAuthError(data.error?.message));
+  saveAuthToken(data.idToken, data.refreshToken, Number(data.expiresIn) * 1000);
+  localStorage.setItem(AUTH_USER_ID_KEY, data.localId);
+  localStorage.setItem(AUTH_USER_EMAIL_KEY, data.email);
+}
+
+function translateAuthError(code) {
+  const map = {
+    EMAIL_NOT_FOUND: "このメールアドレスは登録されていません。",
+    INVALID_PASSWORD: "パスワードが正しくありません。",
+    USER_DISABLED: "このアカウントは無効化されています。",
+    EMAIL_EXISTS: "このメールアドレスはすでに使用されています。",
+    WEAK_PASSWORD: "パスワードは6文字以上で設定してください。",
+    INVALID_EMAIL: "メールアドレスの形式が正しくありません。",
+    TOO_MANY_ATTEMPTS_TRY_LATER: "試行回数が多すぎます。しばらく経ってから再試行してください。",
+    INVALID_LOGIN_CREDENTIALS: "メールアドレスまたはパスワードが正しくありません。",
+  };
+  return map[code] || "認証に失敗しました。入力内容を確認してください。";
+}
+
+async function handleLogout() {
+  const ok = confirm("ログアウトしますか？");
+  if (!ok) return;
+  clearAuthData();
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(STORAGE_RECOVERY_KEY);
+  lastSeenCloudSavedAt = 0;
+  lastLocalMutationAt = 0;
+  replaceState(initialState());
+  if (el.userEmail) el.userEmail.textContent = "";
+  showAuthOverlay();
+  renderAll();
+}
+
+async function autoCloudLoadAfterLogin() {
+  if (isCloudSyncBusy) return;
+  isCloudSyncBusy = true;
+  setCloudBusy(true);
   try {
-    return JSON.parse(text);
+    const parsed = await cloudLoadRequest();
+    if (!parsed.data) return;
+    const migrated = migrateState(parsed.data);
+    lastSeenCloudSavedAt = Math.max(
+      lastSeenCloudSavedAt,
+      Number.isFinite(parsed.savedAt) ? parsed.savedAt : resolveStateUpdatedAt(migrated)
+    );
+    replaceState(migrated);
+    persistState();
   } catch {
-    return { ok: false, message: "レスポンスがJSON形式ではありません。" };
+    // Silent failure — user may be new with no data yet.
+  } finally {
+    isCloudSyncBusy = false;
+    setCloudBusy(false);
   }
 }
 
-function getCloudEndpoint() {
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint) {
-    alert("Apps Script WebアプリURLを入力してください。");
-    return "";
-  }
-  localStorage.setItem(CLOUD_ENDPOINT_KEY, endpoint);
-  return endpoint;
+function showAuthOverlay() {
+  el.authOverlay?.classList.remove("hidden");
+}
+
+function hideAuthOverlay() {
+  el.authOverlay?.classList.add("hidden");
+}
+
+function renderUserInfo() {
+  const email = localStorage.getItem(AUTH_USER_EMAIL_KEY) || "";
+  if (el.userEmail) el.userEmail.textContent = email;
 }
 
 function setCloudBusy(isBusy, options = {}) {
@@ -1696,13 +1905,12 @@ function startCloudAutoSync() {
 }
 
 async function autoCloudLoadOnStartup() {
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint || !isStateEmpty(state) || isCloudSyncBusy) return;
+  if (!isFirebaseConfigured() || !isStateEmpty(state) || isCloudSyncBusy) return;
 
   isCloudSyncBusy = true;
   setCloudBusy(true);
   try {
-    const parsed = await cloudLoadRequest(endpoint);
+    const parsed = await cloudLoadRequest();
     if (!parsed.data) return;
     const migrated = migrateState(parsed.data);
     lastSeenCloudSavedAt = Math.max(
@@ -1720,11 +1928,10 @@ async function autoCloudLoadOnStartup() {
 }
 
 async function autoCloudCheckForRemoteUpdate() {
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint || isCloudSyncBusy) return;
+  if (!isFirebaseConfigured() || isCloudSyncBusy) return;
   if (state.activeSession) return;
   try {
-    const latestSavedAt = await cloudLatestSavedAtRequest(endpoint);
+    const latestSavedAt = await cloudLatestSavedAtRequest();
     if (!latestSavedAt || latestSavedAt <= lastSeenCloudSavedAt) return;
     await autoCloudLoadPeriodic();
   } catch {
@@ -1733,14 +1940,13 @@ async function autoCloudCheckForRemoteUpdate() {
 }
 
 async function autoCloudLoadPeriodic() {
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint || isCloudSyncBusy) return;
+  if (!isFirebaseConfigured() || isCloudSyncBusy) return;
   const loadStartedLocalMutationAt = lastLocalMutationAt;
 
   isCloudSyncBusy = true;
   setCloudBusy(true);
   try {
-    const parsed = await cloudLoadRequest(endpoint);
+    const parsed = await cloudLoadRequest();
     if (!parsed.data) return;
     lastSeenCloudSavedAt = Math.max(
       lastSeenCloudSavedAt,
@@ -1771,13 +1977,12 @@ async function autoCloudLoadPeriodic() {
 }
 
 async function autoCloudSave() {
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint || isCloudSyncBusy) return;
+  if (!isFirebaseConfigured() || isCloudSyncBusy) return;
 
   isCloudSyncBusy = true;
   setCloudBusy(true);
   try {
-    await cloudSaveRequest(endpoint);
+    await cloudSaveRequest(null);
   } catch {
     // Silent failure for background autosave.
   } finally {
@@ -2556,38 +2761,30 @@ function hasUnsyncedChanges() {
 
 function triggerLifecycleImmediateSync() {
   if (!hasUnsyncedChanges()) return;
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint) return;
-  if (isCloudSyncBusy) return;
+  const config = getFirebaseConfigSilent();
+  if (!config || isCloudSyncBusy) return;
   const now = Date.now();
   if (now - lastLifecycleSyncAt < 1200) return;
   lastLifecycleSyncAt = now;
 
-  const payload = {
-    action: "save",
-    sheetId: SPREADSHEET_ID,
-    savedAt: resolveStateUpdatedAt(state),
-    data: state,
-  };
-  const body = JSON.stringify(payload);
-  let sent = false;
-
-  try {
-    if (navigator.sendBeacon) {
-      const blob = new Blob([body], { type: "application/json" });
-      sent = navigator.sendBeacon(endpoint, blob);
-    }
-  } catch {
-    sent = false;
-  }
-
-  if (!sent) {
-    fetch(endpoint, {
-      method: "POST",
-      body,
-      keepalive: true,
-    }).catch(() => {});
-  }
+  const idToken = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!idToken) return;
+  const savedAt = resolveStateUpdatedAt(state);
+  const body = JSON.stringify({
+    fields: {
+      savedAt: { integerValue: String(savedAt) },
+      dataJson: { stringValue: JSON.stringify(state) },
+    },
+  });
+  fetch(buildFirestoreUrl(config), {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${idToken}`,
+    },
+    body,
+    keepalive: true,
+  }).catch(() => {});
 
   queueCloudSave(0);
 }
@@ -2605,8 +2802,7 @@ function queueCloudSave(delayMs = 1200) {
 
 async function flushQueuedCloudSave() {
   if (!cloudSavePending) return;
-  const endpoint = el.cloudEndpoint.value.trim();
-  if (!endpoint) {
+  if (!isFirebaseConfigured()) {
     cloudSavePending = true;
     return;
   }
@@ -2621,7 +2817,7 @@ async function flushQueuedCloudSave() {
   isCloudSyncBusy = true;
   setCloudBusy(true);
   try {
-    const result = await cloudSaveRequest(endpoint, snapshot, saveToken);
+    const result = await cloudSaveRequest(null, snapshot, saveToken);
     if (result && result.hadLocalChangeDuringSave) {
       cloudSavePending = true;
     }
@@ -2793,9 +2989,9 @@ function resolveStateUpdatedAt(target, fallback = 0) {
   return Math.max(stateStamp, fallbackStamp);
 }
 
-async function mergeStateWithCloud(endpoint, localState) {
+async function mergeStateWithCloud(_endpoint, localState) {
   try {
-    const parsed = await cloudLoadRequest(endpoint);
+    const parsed = await cloudLoadRequest();
     if (!parsed.data) return localState;
     const remoteState = migrateState(parsed.data);
     return mergeStates(remoteState, localState);
