@@ -4100,8 +4100,44 @@ function requestNotificationPermission() {
   }
 }
 
+// Slack風の「コンコン」通知音を Web Audio API で合成
+function playNotificationSound() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+  try {
+    const ctx = new AudioCtx();
+    const master = ctx.createGain();
+    master.gain.value = 0.55;
+    master.connect(ctx.destination);
+    const now = ctx.currentTime;
+
+    // 1音目: 高め → 少し下がる (800Hz)
+    const hit = (t, freq, decay, vol) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, t);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.75, t + decay);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(t + decay + 0.02);
+    };
+
+    // コン（1打目）
+    hit(now,        800,  0.13, 0.6);
+    hit(now,       1200,  0.09, 0.25);
+    // コン（2打目・少し低く柔らかく）
+    hit(now + 0.16, 720,  0.13, 0.45);
+    hit(now + 0.16, 1080, 0.09, 0.18);
+
+    setTimeout(() => { try { ctx.close(); } catch (_) {} }, 1000);
+  } catch (_) {}
+}
+
 function checkScheduleNotifications() {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
   if (!Array.isArray(state.scheduleEntries) || !state.scheduleEntries.length) return;
   const now = new Date();
   const date = formatDateInput(now);
@@ -4114,13 +4150,16 @@ function checkScheduleNotifications() {
     if (scheduleNotifiedIds.has(key)) continue;
     scheduleNotifiedIds.add(key);
     const label = getSchedLabel(entry);
-    try {
-      new Notification("スケジュール通知", {
-        body: `${minutesToTimeStr(entry.startMinutes)} 「${label}」の時間です`,
-        icon: "./icon.svg",
-      });
-    } catch (_) {
-      // Notification may fail in some environments; ignore silently
+    // 音を鳴らす
+    playNotificationSound();
+    // OS 通知（許可済みの場合のみ）
+    if ("Notification" in window && Notification.permission === "granted") {
+      try {
+        new Notification("スケジュール通知", {
+          body: `${minutesToTimeStr(entry.startMinutes)} 「${label}」の時間です`,
+          icon: "./icon.svg",
+        });
+      } catch (_) {}
     }
   }
 }
