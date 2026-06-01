@@ -143,6 +143,10 @@ const el = {
   scheduleActualCol: document.getElementById("schedule-actual-col"),
   scheduleTimeGutter: document.getElementById("schedule-time-gutter"),
   schedulePopover: document.getElementById("schedule-popover"),
+  scheduleTemplateSelect: document.getElementById("schedule-template-select"),
+  scheduleTemplateApply: document.getElementById("schedule-template-apply"),
+  scheduleTemplateDelete: document.getElementById("schedule-template-delete"),
+  scheduleTemplateSave: document.getElementById("schedule-template-save"),
 };
 
 if (!localStorage.getItem(AUTH_USER_ID_KEY)) {
@@ -248,6 +252,9 @@ function bindEvents() {
     const clickMins = y / SCHED_PX_PER_MIN + SCHED_START_HOUR * 60;
     openSchedPopover({ mode: "add", clickMins, clientX: e.clientX, clientY: e.clientY });
   });
+  el.scheduleTemplateApply.addEventListener("click", applyScheduleTemplate);
+  el.scheduleTemplateDelete.addEventListener("click", deleteScheduleTemplate);
+  el.scheduleTemplateSave.addEventListener("click", saveScheduleTemplate);
 
   el.topForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -1627,6 +1634,8 @@ function replaceState(next) {
   state.addSectionsCollapsed = next.addSectionsCollapsed;
   state.scheduleEntries = next.scheduleEntries;
   state.deletedScheduleEntryIds = next.deletedScheduleEntryIds;
+  state.scheduleTemplates = next.scheduleTemplates;
+  state.deletedScheduleTemplateIds = next.deletedScheduleTemplateIds;
   state.lastDataChangeAt = next.lastDataChangeAt;
 }
 
@@ -2970,6 +2979,10 @@ function migrateState(parsed) {
       ? parsed.scheduleEntries.map(normalizeScheduleEntry).filter(Boolean)
       : [],
     deletedScheduleEntryIds: uniqueStrings(parsed.deletedScheduleEntryIds),
+    scheduleTemplates: Array.isArray(parsed.scheduleTemplates)
+      ? parsed.scheduleTemplates.map(normalizeScheduleTemplate).filter(Boolean)
+      : [],
+    deletedScheduleTemplateIds: uniqueStrings(parsed.deletedScheduleTemplateIds),
     lastDataChangeAt:
       Number.isFinite(parsed.lastDataChangeAt) && parsed.lastDataChangeAt > 0
         ? parsed.lastDataChangeAt
@@ -2983,9 +2996,11 @@ function migrateState(parsed) {
   const deletedTaskSet = new Set(next.deletedTaskIds);
   const deletedSessionSet = new Set(next.deletedSessionIds);
   const deletedSchedSet = new Set(next.deletedScheduleEntryIds);
+  const deletedSchedTplSet = new Set(next.deletedScheduleTemplateIds);
   next.tasks = next.tasks.filter((t) => !deletedTaskSet.has(t.id));
   next.sessions = next.sessions.filter((s) => !deletedSessionSet.has(s.id));
   next.scheduleEntries = next.scheduleEntries.filter((e) => !deletedSchedSet.has(e.id));
+  next.scheduleTemplates = next.scheduleTemplates.filter((t) => !deletedSchedTplSet.has(t.id));
 
   const hasMissingTopRef = next.largeGroups.some((g) => !g.topGroupId);
   if (!next.topGroups.length || hasMissingTopRef) {
@@ -3047,6 +3062,8 @@ function initialState() {
     addSectionsCollapsed: false,
     scheduleEntries: [],
     deletedScheduleEntryIds: [],
+    scheduleTemplates: [],
+    deletedScheduleTemplateIds: [],
     lastDataChangeAt: Date.now(),
   };
 }
@@ -3080,6 +3097,10 @@ function mergeStates(base, incoming) {
   const deletedScheduleEntryIds = uniqueStrings([
     ...(base.deletedScheduleEntryIds || []),
     ...(incoming.deletedScheduleEntryIds || []),
+  ]);
+  const deletedScheduleTemplateIds = uniqueStrings([
+    ...(base.deletedScheduleTemplateIds || []),
+    ...(incoming.deletedScheduleTemplateIds || []),
   ]);
 
   const baseUpdatedAt = resolveStateUpdatedAt(base);
@@ -3120,6 +3141,8 @@ function mergeStates(base, incoming) {
     taskCollapsed: incoming.taskCollapsed || base.taskCollapsed,
     scheduleEntries: mergeEntities(base.scheduleEntries || [], incoming.scheduleEntries || []),
     deletedScheduleEntryIds,
+    scheduleTemplates: mergeEntities(base.scheduleTemplates || [], incoming.scheduleTemplates || []),
+    deletedScheduleTemplateIds,
     lastDataChangeAt: Math.max(resolveStateUpdatedAt(base), resolveStateUpdatedAt(incoming)),
   };
 
@@ -3629,6 +3652,7 @@ function openScheduleModal() {
     el.scheduleDayDate.value = formatDateInput(new Date());
   }
   el.scheduleModal.classList.remove("hidden");
+  renderTemplateSelect();
   renderScheduleGrid();
   requestNotificationPermission();
 }
@@ -4135,6 +4159,136 @@ function playNotificationSound() {
 
     setTimeout(() => { try { ctx.close(); } catch (_) {} }, 1000);
   } catch (_) {}
+}
+
+// ── Template functions ──
+
+function normalizeScheduleTemplate(t) {
+  if (!t || typeof t !== "object") return null;
+  return {
+    id: typeof t.id === "string" && t.id ? t.id : uid(),
+    name: typeof t.name === "string" && t.name.trim() ? t.name.trim() : "テンプレート",
+    entries: Array.isArray(t.entries)
+      ? t.entries.map((e) => ({
+          startMinutes: Number.isFinite(e.startMinutes) ? e.startMinutes : SCHED_START_HOUR * 60,
+          endMinutes: Number.isFinite(e.endMinutes) ? e.endMinutes : (SCHED_START_HOUR + 1) * 60,
+          type: ["top", "large", "mid", "task"].includes(e.type) ? e.type : "task",
+          refId: typeof e.refId === "string" ? e.refId : "",
+        }))
+      : [],
+    updatedAt: Number.isFinite(t.updatedAt) ? t.updatedAt : 0,
+  };
+}
+
+function renderTemplateSelect() {
+  const sel = el.scheduleTemplateSelect;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">(テンプレートを選択)</option>';
+  const templates = state.scheduleTemplates || [];
+  for (const tpl of templates) {
+    const opt = document.createElement("option");
+    opt.value = tpl.id;
+    opt.textContent = `${tpl.name}（${tpl.entries.length}件）`;
+    if (tpl.id === current) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+function saveScheduleTemplate() {
+  if (!ensureSyncMutable("テンプレート保存")) return;
+  const date = getSchedDate();
+  const entries = (state.scheduleEntries || []).filter((e) => e.date === date);
+  if (!entries.length) {
+    alert("保存する予定がありません。先に予定を追加してください。");
+    return;
+  }
+  const name = prompt(
+    `テンプレート名を入力してください（${entries.length}件の予定を保存）:`,
+    "通常業務"
+  );
+  if (!name || !name.trim()) return;
+
+  if (!Array.isArray(state.scheduleTemplates)) state.scheduleTemplates = [];
+  const tpl = normalizeScheduleTemplate({
+    id: uid(),
+    name: name.trim(),
+    entries: entries.map((e) => ({
+      startMinutes: e.startMinutes,
+      endMinutes: e.endMinutes,
+      type: e.type,
+      refId: e.refId,
+    })),
+    updatedAt: Date.now(),
+  });
+  state.scheduleTemplates.push(tpl);
+  state.lastDataChangeAt = Date.now();
+  persistAndRender();
+  renderTemplateSelect();
+  el.scheduleTemplateSelect.value = tpl.id;
+}
+
+function applyScheduleTemplate() {
+  if (!ensureSyncMutable("テンプレート適用")) return;
+  const tplId = el.scheduleTemplateSelect.value;
+  if (!tplId) {
+    alert("テンプレートを選択してください。");
+    return;
+  }
+  const tpl = (state.scheduleTemplates || []).find((t) => t.id === tplId);
+  if (!tpl) return;
+
+  const date = getSchedDate();
+  const existing = (state.scheduleEntries || []).filter((e) => e.date === date);
+
+  if (existing.length > 0) {
+    if (
+      !confirm(
+        `「${tpl.name}」を適用します。\n当日の既存予定（${existing.length}件）を削除して上書きしますか？`
+      )
+    )
+      return;
+    // 既存の予定を削除
+    if (!Array.isArray(state.deletedScheduleEntryIds)) state.deletedScheduleEntryIds = [];
+    state.deletedScheduleEntryIds.push(...existing.map((e) => e.id));
+    state.scheduleEntries = (state.scheduleEntries || []).filter((e) => e.date !== date);
+  }
+
+  // テンプレートのエントリを今日の日付でコピー
+  if (!Array.isArray(state.scheduleEntries)) state.scheduleEntries = [];
+  for (const te of tpl.entries) {
+    state.scheduleEntries.push({
+      id: uid(),
+      date,
+      startMinutes: te.startMinutes,
+      endMinutes: te.endMinutes,
+      type: te.type,
+      refId: te.refId,
+      updatedAt: Date.now(),
+    });
+  }
+
+  state.lastDataChangeAt = Date.now();
+  persistAndRender();
+  renderScheduleGrid();
+}
+
+function deleteScheduleTemplate() {
+  if (!ensureSyncMutable("テンプレート削除")) return;
+  const tplId = el.scheduleTemplateSelect.value;
+  if (!tplId) {
+    alert("削除するテンプレートを選択してください。");
+    return;
+  }
+  const tpl = (state.scheduleTemplates || []).find((t) => t.id === tplId);
+  if (!tpl) return;
+  if (!confirm(`「${tpl.name}」を削除しますか？`)) return;
+
+  if (!Array.isArray(state.deletedScheduleTemplateIds)) state.deletedScheduleTemplateIds = [];
+  state.deletedScheduleTemplateIds.push(tpl.id);
+  state.scheduleTemplates = (state.scheduleTemplates || []).filter((t) => t.id !== tpl.id);
+  state.lastDataChangeAt = Date.now();
+  persistAndRender();
+  renderTemplateSelect();
 }
 
 function checkScheduleNotifications() {

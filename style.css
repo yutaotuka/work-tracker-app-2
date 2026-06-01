@@ -2281,3 +2281,69 @@ button:disabled {
 .sched-pop-btn-cancel:hover {
   background: #f8fafc;
 }
+
+/* ── Template bar ── */
+.schedule-template-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.schedule-template-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.schedule-template-select {
+  flex: 1;
+  min-width: 140px;
+  font-size: 13px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: #fff;
+}
+
+.sched-tpl-save-btn {
+  font-size: 12px;
+  padding: 5px 11px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.sched-tpl-save-btn:hover {
+  background: var(--accent-strong);
+}
+
+.sched-tpl-delete-btn {
+  font-size: 12px;
+  padding: 5px 11px;
+  background: #fff;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  cursor: pointer;
+  white-space: nowrap;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+
+.sched-tpl-delete-btn:hover {
+  background: #fff1f1;
+}
