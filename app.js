@@ -143,6 +143,7 @@ const el = {
   scheduleActualCol: document.getElementById("schedule-actual-col"),
   scheduleTimeGutter: document.getElementById("schedule-time-gutter"),
   schedulePopover: document.getElementById("schedule-popover"),
+  scheduleSummary: document.getElementById("schedule-summary"),
   scheduleTemplateSelect: document.getElementById("schedule-template-select"),
   scheduleTemplateApply: document.getElementById("schedule-template-apply"),
   scheduleTemplateDelete: document.getElementById("schedule-template-delete"),
@@ -3792,6 +3793,65 @@ function renderScheduleGrid() {
       }
     }
   }
+
+  renderScheduleSummary();
+}
+
+function renderScheduleSummary() {
+  const summaryEl = el.scheduleSummary;
+  if (!summaryEl) return;
+
+  const date = getSchedDate();
+  const entries = (state.scheduleEntries || []).filter((e) => e.date === date);
+
+  if (!entries.length) {
+    summaryEl.innerHTML = "";
+    return;
+  }
+
+  // refId ごとに合計時間を集計（同じ項目が複数ブロックあれば合算）
+  const totalsMap = new Map(); // refId → { label, type, totalMins }
+  // 開始時刻順に並べてから集計（表示順を時系列にする）
+  const sorted = [...entries].sort((a, b) => a.startMinutes - b.startMinutes);
+  for (const entry of sorted) {
+    const key = entry.refId || entry.id;
+    const dur = Math.max(0, entry.endMinutes - entry.startMinutes);
+    if (totalsMap.has(key)) {
+      totalsMap.get(key).totalMins += dur;
+    } else {
+      totalsMap.set(key, { label: getSchedLabel(entry), type: entry.type, totalMins: dur });
+    }
+  }
+
+  const items = [...totalsMap.values()];
+  const grandTotal = items.reduce((sum, i) => sum + i.totalMins, 0);
+
+  const typeNames = { top: "最上位", large: "大グループ", mid: "中グループ", task: "タスク" };
+
+  const fmtMins = (mins) => {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h > 0 && m > 0) return `${h}h ${m}m`;
+    if (h > 0) return `${h}h`;
+    return `${m}m`;
+  };
+
+  const chips = items
+    .map((item) => {
+      const colors = SCHED_COLORS[item.type] || SCHED_COLORS.task;
+      return (
+        `<span class="sched-summary-item" style="border-left-color:${colors.border};background:${colors.bg};color:${colors.text}">` +
+        `<span class="sched-summary-name">${escapeHtml(item.label)}</span>` +
+        `<span class="sched-summary-type">${escapeHtml(typeNames[item.type] || "")}</span>` +
+        `<span class="sched-summary-time">${fmtMins(item.totalMins)}</span>` +
+        `</span>`
+      );
+    })
+    .join("");
+
+  summaryEl.innerHTML =
+    `<div class="sched-summary-head">予定合計 <strong>${fmtMins(grandTotal)}</strong></div>` +
+    `<div class="sched-summary-list">${chips}</div>`;
 }
 
 function buildSchedBlock(entry) {

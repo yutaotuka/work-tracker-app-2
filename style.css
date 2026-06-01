@@ -2347,3 +2347,66 @@ button:disabled {
 .sched-tpl-delete-btn:hover {
   background: #fff1f1;
 }
+
+/* ── Schedule Summary ── */
+.schedule-summary {
+  flex-shrink: 0;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  min-height: 0;
+}
+
+.schedule-summary:empty {
+  display: none;
+}
+
+.sched-summary-head {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.sched-summary-head strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sched-summary-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.sched-summary-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px 4px 7px;
+  border-left: 3px solid;
+  border-radius: 5px;
+  font-size: 12px;
+  max-width: 220px;
+}
+
+.sched-summary-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 120px;
+}
+
+.sched-summary-type {
+  font-size: 10px;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+.sched-summary-time {
+  font-weight: 700;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 4px;
+}
