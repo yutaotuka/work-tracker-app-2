@@ -1829,12 +1829,19 @@ async function handleLogout() {
 }
 
 async function autoCloudLoadAfterLogin() {
+  // ログイン時は必ず前ユーザーのローカルデータを消去してからロード
+  replaceState(initialState());
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(STORAGE_RECOVERY_KEY);
+  lastSeenCloudSavedAt = 0;
+  lastLocalMutationAt = 0;
+
   if (isCloudSyncBusy) return;
   isCloudSyncBusy = true;
   setCloudBusy(true);
   try {
     const parsed = await cloudLoadRequest();
-    if (!parsed.data) return;
+    if (!parsed.data) return; // 新規ユーザーはデータなしで空の状態からスタート
     const migrated = migrateState(parsed.data);
     lastSeenCloudSavedAt = Math.max(
       lastSeenCloudSavedAt,
