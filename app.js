@@ -1959,10 +1959,9 @@ async function autoCloudLoadPeriodic() {
     );
     const remote = migrateState(parsed.data);
     const local = migrateState(state);
+    // クラウドの保存時刻がローカルの最終変更時刻以下なら、ローカルの方が新しいので適用しない
+    if (parsed.savedAt > 0 && parsed.savedAt <= resolveStateUpdatedAt(local)) return;
     const merged = mergeStates(remote, local);
-    const localStamp = resolveStateUpdatedAt(local);
-    const mergedStamp = resolveStateUpdatedAt(merged, parsed.savedAt);
-    if (mergedStamp < localStamp) return;
     if (state.activeSession && !merged.activeSession) {
       merged.activeSession = state.activeSession;
     }
